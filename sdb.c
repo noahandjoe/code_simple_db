@@ -16,6 +16,8 @@ typedef enum
 typedef enum
 {
     PREPARE_SUCCESS,
+    PREPARE_NEGATIVE_ID,
+    PREPARE_STRING_TOO_LONG,
     PREPARE_SYNTAX_ERROR,
     PREPARE_UNRECOGNIZED_STATEMENT
 } PrepareResult;
@@ -32,14 +34,13 @@ typedef enum
     STATEMENT_SELECT
 } StatementType;
 
-
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
 typedef struct
 {
     uint32_t id;
-    char username[COLUMN_USERNAME_SIZE];
-    char email[COLUMN_EMAIL_SIZE];
+    char username[COLUMN_USERNAME_SIZE + 1];
+    char email[COLUMN_EMAIL_SIZE + 1];
 } Row;
 
 typedef struct
@@ -89,7 +90,6 @@ typedef struct
     void *pages[TABLE_MAX_PAGES];
 } Table;
 
-
 void serialize_row(Row *source, void *destination)
 {
     memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
@@ -103,8 +103,6 @@ void deserialize_row(void *source, Row *destination)
     memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
     memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
 }
-
-
 
 // figure out where to read/write in memory for a particular row
 void *row_slot(Table *table, uint32_t row_num)
@@ -152,7 +150,7 @@ void print_prompt();
 void read_input(InputBuffer *input_buffer);
 void close_input_buffer(InputBuffer *input_buffer);
 
-MetaCommandResult do_meta_command(InputBuffer *input_buffer,Table *table);
+MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table);
 PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement);
 ExecuteResult execute_insert(Statement *statement, Table *table);
 ExecuteResult execute_select(Statement *statement, Table *table);
@@ -189,6 +187,12 @@ int main()
         {
         case (PREPARE_SUCCESS):
             break;
+        case (PREPARE_NEGATIVE_ID):
+            printf("ID must be positive.\n");
+            continue;
+        case (PREPARE_STRING_TOO_LONG):
+            printf("String is too long.\n");
+            continue;
         case (PREPARE_SYNTAX_ERROR):
             printf("Syntax error. Could not parse statement.\n");
             continue;
@@ -203,7 +207,7 @@ int main()
             printf("Executed.\n");
             break;
         case (EXECUTE_TABLE_FULL):
-            printf("Error: Table full. \n");
+            printf("Error: Table full.\n");
             break;
         }
     }
@@ -240,7 +244,7 @@ void close_input_buffer(InputBuffer *input_buffer)
 }
 
 // a wrapper for existing functionality, leaves room for more commands
-MetaCommandResult do_meta_command(InputBuffer *input_buffer,Table *table)
+MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table)
 {
     if (strcmp(input_buffer->buffer, ".exit") == 0)
     {
@@ -254,26 +258,50 @@ MetaCommandResult do_meta_command(InputBuffer *input_buffer,Table *table)
     }
 }
 
+// parse the string from insert command
+PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement)
+{
+    statement->type = STATEMENT_INSERT;
+    char *keyword = strtok(input_buffer->buffer, " ");
+    char *id_string = strtok(NULL, " ");
+    char *username = strtok(NULL, " ");
+    char *email = strtok(NULL, " ");
+
+    if (id_string == NULL || username == NULL || email == NULL)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    int id = atoi(id_string);
+    if (id < 0)
+    {
+        return PREPARE_NEGATIVE_ID;
+    }
+    if (strlen(username) > COLUMN_USERNAME_SIZE)
+    {
+        return PREPARE_STRING_TOO_LONG;
+    }
+    if (strlen(email) > COLUMN_EMAIL_SIZE)
+    {
+        return PREPARE_STRING_TOO_LONG;
+    }
+
+    statement->row_to_insert.id = id;
+    strcpy(statement->row_to_insert.username, username);
+    strcpy(statement->row_to_insert.email, email);
+
+    return PREPARE_SUCCESS;
+}
+
 //"SQL Compiler" parse arguments
 PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement)
 {
     //"insert" keyword will be followed by data
     if (strncmp(input_buffer->buffer, "insert", 6) == 0)
     {
-        statement->type = STATEMENT_INSERT;
-        int args_assigned = sscanf(
-            input_buffer->buffer, "insert %u %s %s",
-            &(statement->row_to_insert.id),
-            statement->row_to_insert.username,
-            statement->row_to_insert.email);
-
-        if (args_assigned < 3)
-        {
-            return PREPARE_SYNTAX_ERROR;
-        }
-
-        return PREPARE_SUCCESS;
+        return prepare_insert(input_buffer, statement);
     }
+
     if (strcmp(input_buffer->buffer, "select") == 0)
     {
         statement->type = STATEMENT_SELECT;
@@ -291,8 +319,7 @@ ExecuteResult execute_insert(Statement *statement, Table *table)
     }
 
     Row *row_to_insert = &(statement->row_to_insert);
-    uint32_t row_num = table->num_rows;
-    void* row_memory = row_slot(table, row_num);
+    void *row_memory = row_slot(table, table->num_rows);
     memset(row_memory, 0, ROW_SIZE);
     serialize_row(row_to_insert, row_memory);
     table->num_rows += 1;
